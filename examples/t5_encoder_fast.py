@@ -7,10 +7,10 @@ from torch.nn.attention.flex_attention import BlockMask
 from tensorizer import TensorDeserializer
 from sentencepiece import SentencePieceProcessor
 
-from nai_t5 import T5Config, T5EncoderStack
-from nai_t5.t5_encoder import make_self_attn_block_mask
-from nai_t5.t5_common import T5AttnImpl
-from nai_t5.fuse_norm_scales import fuse_norm_scales_enc
+from nai_t5_wrapper import T5Config, T5EncoderStack
+from nai_t5_wrapper.t5_encoder import make_self_attn_block_mask
+from nai_t5_wrapper.t5_common import T5AttnImpl
+from nai_t5_wrapper.fuse_norm_scales import fuse_norm_scales_enc
 
 t5_dir = Path('ckpt/goog-t5-v1.1-small-bf16')
 
