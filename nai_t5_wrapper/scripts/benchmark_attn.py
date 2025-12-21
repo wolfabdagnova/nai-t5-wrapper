@@ -7,8 +7,8 @@ from triton.testing import do_bench
 from transformers.models.t5.configuration_t5 import T5Config as T5ConfigHF
 from transformers.models.t5.modeling_t5 import T5Attention
 from transformers.models.t5 import T5TokenizerFast
-from nai_t5 import T5Config, to_based_config
-from nai_t5.t5_encoder import T5EncoderSelfAttention
+from nai_t5_wrapper import T5Config, to_based_config
+from nai_t5_wrapper.t5_encoder import T5EncoderSelfAttention
 
 def get_flops_achieved(f):
   flop_counter = FlopCounterMode(display=True)

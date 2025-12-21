@@ -1,40 +1,78 @@
-# NovelAI T5
+# NAI-T5 Wrapper
 
-Model code for T5. Designed to be fast and have good float16 support.  
-Somewhat tidy.  
-Somewhat tested.
+HuggingFace-compatible wrapper for [NovelAI's T5 implementation](https://github.com/NovelAI/t5) with Flex Attention support for T5, MT5, and UMT5 models.
+
+This is a community fork that adds:
+- Drop-in replacement for HuggingFace's `T5EncoderModel`, `MT5EncoderModel`, and `UMT5EncoderModel`
+- Automatic runtime conversion from HuggingFace weights
+- MT5 and UMT5 model support
 
 ## Install
 
-Install the `nai-t5` package, available [on PyPI](https://pypi.org/project/nai-t5/).
-
 ```bash
-# installs nai-t5 from PyPI
-pip install nai_t5
+# Install from PyPI
+pip install nai-t5-wrapper
 
-# or install from GitHub source like so:
-pip install git+https://github.com/NovelAI/t5.git
+# Or install from GitHub source
+pip install git+https://github.com/bghira/nai-t5-wrapper.git
 ```
 
-Other packages you'll probably want:
+## Quick Start (HuggingFace-Compatible API)
+
+The wrapper provides a drop-in replacement for HuggingFace T5 encoder models:
+
+```python
+from nai_t5_wrapper import NAIT5EncoderModel
+from transformers import AutoTokenizer
+
+# Load any supported T5 variant - weights are converted at runtime
+model = NAIT5EncoderModel.from_pretrained('google/t5-v1_1-xxl')
+# model = NAIT5EncoderModel.from_pretrained('google/mt5-xxl')
+# model = NAIT5EncoderModel.from_pretrained('google/umt5-xxl')
+
+tokenizer = AutoTokenizer.from_pretrained('google/t5-v1_1-xxl')
+
+# Use like HuggingFace T5EncoderModel
+inputs = tokenizer("Hello world", return_tensors="pt")
+output = model(inputs.input_ids.cuda(), attention_mask=inputs.attention_mask.cuda())
+embeddings = output.last_hidden_state  # or output[0]
+```
+
+### Supported Models
+
+| Model Type | Example HuggingFace IDs |
+|------------|------------------------|
+| T5 v1.1 | `google/t5-v1_1-small`, `google/t5-v1_1-xl`, `google/t5-v1_1-xxl` |
+| MT5 | `google/mt5-small`, `google/mt5-xl`, `google/mt5-xxl` |
+| UMT5 | `google/umt5-small`, `google/umt5-xl`, `google/umt5-xxl` |
+
+### Additional Options
+
+```python
+# Custom sequence length (default: 512)
+model = NAIT5EncoderModel.from_pretrained('google/t5-v1_1-xxl', max_seq_len=256)
+
+# Custom dtype
+model = NAIT5EncoderModel.from_pretrained('google/t5-v1_1-xxl', torch_dtype=torch.float16)
+
+# Compile for additional speedup
+model = NAIT5EncoderModel.from_pretrained('google/t5-v1_1-xxl').compile()
+```
+
+## Advanced Usage
+
+For advanced usage with pre-converted weights and the underlying NAI-T5 API, see the [encoder usage](docs/usage-encoder.md) or [decoder usage](docs/usage-decoder.md) docs.
+
+Other packages you may want:
 
 ```bash
-# Sentencepiece tokenizer recommended, but you can use HF tokenizers too
+# Sentencepiece tokenizer (alternative to HF tokenizers)
 pip install sentencepiece
-# tensorizer recommended for weight-loading
+# Tensorizer for pre-converted weight loading
 pip install tensorizer async_timeout
 ```
 
-We recommend sentencepiece as tokenizer. See [tokenization](docs/tokenizers.md) docs for our reasoning.
-
-## Get weights
-
-See [weight loading](docs/get-weights.md) docs for how to convert HF weights to a format we can load, and to update the tokenizer model with the special tokens it's missing.
-
-## Usage
-
-See [encoder usage](docs/usage-encoder.md) or [decoder usage](docs/usage-decoder.md) docs.  
-Typically you'll want to use the encoder, but the decoder can be useful for querying T5 to determine concepts it understands.
+See [weight loading](docs/get-weights.md) docs for how to convert HF weights to tensorizer format.
 
 ## What's included
 
@@ -337,8 +375,12 @@ Graphcore, [Running Flan-T5‌-XL Inference In Float16‍ Fo‌r IPU - Ho‌w We
 
 ## Contribution
 
-This repository is open-source but not open-contribution. Be prepared that we may not have bandwidth to review pull requests or answer issues; we develop this during spare time. We are interested in knowing about breaks, but improving convenience or compatibility is a lower priority.
+This is a community fork. Contributions, bug reports, and feature requests are welcome via [GitHub Issues](https://github.com/bghira/nai-t5-wrapper/issues) and Pull Requests.
+
+## Acknowledgements
+
+This wrapper is built on top of [NovelAI's T5 implementation](https://github.com/NovelAI/t5). We thank NovelAI for open-sourcing their optimized T5 codebase.
 
 ## License
 
-Apache 2.0. Uses code from [HF transformers](https://github.com/huggingface/transformers), which is [also Apache 2.0](https://github.com/huggingface/transformers/blob/main/LICENSE).
+Apache 2.0. Uses code from [NovelAI/t5](https://github.com/NovelAI/t5) and [HF transformers](https://github.com/huggingface/transformers), both Apache 2.0 licensed.

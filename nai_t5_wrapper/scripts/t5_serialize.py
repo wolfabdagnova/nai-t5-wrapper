@@ -11,13 +11,15 @@ import torch
 
 from transformers.models.umt5 import UMT5ForConditionalGeneration, UMT5EncoderModel
 from transformers.models.umt5.configuration_umt5 import UMT5Config
+from transformers.models.mt5 import MT5ForConditionalGeneration, MT5EncoderModel
+from transformers.models.mt5.configuration_mt5 import MT5Config
 from transformers import LlamaTokenizerFast
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoTokenizer
 from transformers.models.t5 import T5ForConditionalGeneration, T5TokenizerFast, T5EncoderModel
 from transformers.models.t5.configuration_t5 import T5Config as T5ConfigHF
 
-from nai_t5 import T5, T5EncoderStack, T5Config, hf_to_based_t5_state, hf_to_based_t5_enc_state, to_based_config
-from nai_t5.sp_add_mask_vocab import add_mask_vocab
+from nai_t5_wrapper import T5, T5EncoderStack, T5Config, hf_to_based_t5_state, hf_to_based_t5_enc_state, to_based_config
+from nai_t5_wrapper.sp_add_mask_vocab import add_mask_vocab
 
 
 class DType(str, Enum):
@@ -60,38 +62,55 @@ def main():
     wants_enc: bool = args.enc
     wants_encdec: bool = args.encdec
 
-    hf_config: T5ConfigHF | UMT5Config = AutoConfig.from_pretrained(args.model_name)
-    assert isinstance(hf_config, (T5ConfigHF, UMT5Config))
+    hf_config: T5ConfigHF | UMT5Config | MT5Config = AutoConfig.from_pretrained(args.model_name)
+    assert isinstance(hf_config, (T5ConfigHF, UMT5Config, MT5Config)), \
+        f"Unsupported config type: {type(hf_config)}"
 
-    is_umt5: bool = hf_config.model_type == 'umt5'
+    model_type: str = hf_config.model_type
+    is_umt5: bool = model_type == 'umt5'
+    is_mt5: bool = model_type == 'mt5'
 
+    # Load tokenizer - UMT5 uses LlamaTokenizer, MT5 uses its own, T5 uses T5TokenizerFast
     if is_umt5:
-        hf_tokenizer: LlamaTokenizerFast = LlamaTokenizerFast.from_pretrained(args.model_name)
+        hf_tokenizer = LlamaTokenizerFast.from_pretrained(args.model_name)
+    elif is_mt5:
+        # MT5 uses AutoTokenizer which handles its SentencePiece model correctly
+        hf_tokenizer = AutoTokenizer.from_pretrained(args.model_name, legacy=False)
     else:
-        hf_tokenizer: T5TokenizerFast = T5TokenizerFast.from_pretrained(args.model_name, legacy=False)
+        hf_tokenizer = T5TokenizerFast.from_pretrained(args.model_name, legacy=False)
 
     weight_dtype: Optional[torch.dtype] = None if args.weight_dtype is None else dtype_map[args.weight_dtype]
     hf_dtype_kwargs = {} if weight_dtype is None else {'torch_dtype': weight_dtype}
 
     if wants_encdec:
         if is_umt5:
-            hf_t5: UMT5ForConditionalGeneration = UMT5ForConditionalGeneration.from_pretrained(
+            hf_t5 = UMT5ForConditionalGeneration.from_pretrained(
+                args.model_name,
+                **hf_dtype_kwargs,
+            ).eval()
+        elif is_mt5:
+            hf_t5 = MT5ForConditionalGeneration.from_pretrained(
                 args.model_name,
                 **hf_dtype_kwargs,
             ).eval()
         else:
-            hf_t5: T5ForConditionalGeneration = T5ForConditionalGeneration.from_pretrained(
+            hf_t5 = T5ForConditionalGeneration.from_pretrained(
                 args.model_name,
                 **hf_dtype_kwargs,
             ).eval()
     elif wants_enc:
         if is_umt5:
-            hf_t5_enc: UMT5EncoderModel = UMT5EncoderModel.from_pretrained(
+            hf_t5_enc = UMT5EncoderModel.from_pretrained(
+                args.model_name,
+                **hf_dtype_kwargs,
+            ).eval()
+        elif is_mt5:
+            hf_t5_enc = MT5EncoderModel.from_pretrained(
                 args.model_name,
                 **hf_dtype_kwargs,
             ).eval()
         else:
-            hf_t5_enc: T5EncoderModel = T5EncoderModel.from_pretrained(
+            hf_t5_enc = T5EncoderModel.from_pretrained(
                 args.model_name,
                 **hf_dtype_kwargs,
             ).eval()

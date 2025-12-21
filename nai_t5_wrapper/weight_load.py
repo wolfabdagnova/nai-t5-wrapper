@@ -1,6 +1,6 @@
-from nai_t5 import T5, T5Config
-from nai_t5.t5_encoder import T5EncoderStack, T5EncoderLayer
-from nai_t5.t5_decoder import T5DecoderStack, T5DecoderLayer
+from nai_t5_wrapper import T5, T5Config
+from nai_t5_wrapper.t5_encoder import T5EncoderStack, T5EncoderLayer
+from nai_t5_wrapper.t5_decoder import T5DecoderStack, T5DecoderLayer
 from typing import Optional, OrderedDict, TYPE_CHECKING, Any, Protocol, Literal, Callable, NamedTuple, Sequence
 from dataclasses import dataclass, field
 from functools import partial

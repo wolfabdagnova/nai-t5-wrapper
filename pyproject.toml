@@ -24,23 +24,38 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "nai-t5"
-version = "1.0.10"
-description = "NovelAI T5"
-authors = [{name = "NovelAI/Anlatan Inc."}]
+name = "nai-t5-wrapper"
+version = "1.0.0"
+description = "HuggingFace-compatible wrapper for NovelAI's T5 with Flex Attention - supports T5, MT5, and UMT5"
+authors = [
+    {name = "NovelAI/Anlatan Inc."},
+    {name = "SimpleTuner Contributors"},
+]
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
-keywords = ["t5", "novelai"]
+keywords = ["t5", "mt5", "umt5", "novelai", "flex-attention", "transformers"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
-    "torch",
+    "torch>=2.0",
     "einops",
     "pydantic",
+    "transformers",
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/NovelAI/t5"
-"Issue Tracker" = "https://github.com/NovelAI/t5/issues"
+"Homepage" = "https://github.com/bghira/nai-t5-wrapper"
+"Issue Tracker" = "https://github.com/bghira/nai-t5-wrapper/issues"
 
 [project.optional-dependencies]
 hf = ["transformers", "tokenizers"]
@@ -49,15 +64,18 @@ tensorizer = ["tensorizer"]
 bench = ["tabulate", "triton"]
 
 [project.scripts]
-t5_serialize = "nai_t5.scripts.t5_serialize:main"
-t5_serialize_dtensor = "nai_t5.scripts.t5_serialize_dtensor:main"
-tokenizer_hf_to_sentencepiece = "nai_t5.scripts.tokenizer_hf_to_sentencepiece:main"
+t5_serialize = "nai_t5_wrapper.scripts.t5_serialize:main"
+t5_serialize_dtensor = "nai_t5_wrapper.scripts.t5_serialize_dtensor:main"
+tokenizer_hf_to_sentencepiece = "nai_t5_wrapper.scripts.tokenizer_hf_to_sentencepiece:main"
 
 [tool.hatch.build.targets.sdist]
 include = [
-  "nai_t5/",
+  "nai_t5_wrapper/",
   "pyproject.toml",
   "README.md",
   "LICENSE",
   "requirements.txt",
 ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["nai_t5_wrapper"]

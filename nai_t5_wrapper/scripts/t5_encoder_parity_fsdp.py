@@ -23,7 +23,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from tensorizer import TensorDeserializer
 from sentencepiece import SentencePieceProcessor
 
-from nai_t5 import T5Config, T5EncoderStack
+from nai_t5_wrapper import T5Config, T5EncoderStack
 
 
 from torch import Tensor

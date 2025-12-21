@@ -9,9 +9,9 @@ from torch import inference_mode
 from tensorizer import TensorDeserializer
 from sentencepiece import SentencePieceProcessor
 from einops import rearrange
-from nai_t5 import T5Config
-from nai_t5.t5_common import T5AttnImpl
-from nai_t5.t5_encoder import T5EncoderStack, T5EncoderLayer, T5EncoderSelfAttention, T5EncoderSelfAttentionFlex
+from nai_t5_wrapper import T5Config
+from nai_t5_wrapper.t5_common import T5AttnImpl
+from nai_t5_wrapper.t5_encoder import T5EncoderStack, T5EncoderLayer, T5EncoderSelfAttention, T5EncoderSelfAttentionFlex
 
 device=torch.device('cuda')
 

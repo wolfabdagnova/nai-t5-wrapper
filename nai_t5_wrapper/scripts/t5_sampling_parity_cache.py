@@ -15,8 +15,8 @@ from transformers.models.t5.configuration_t5 import T5Config as T5ConfigHF
 from transformers.tokenization_utils_base import BatchEncoding
 from transformers.utils.generic import TensorType
 
-from nai_t5 import T5, T5Config, hf_to_based_t5_state, to_based_config
-from nai_t5.sampling import BoundDecode, MakeLogitGenerator, generate_greedy, generate_until
+from nai_t5_wrapper import T5, T5Config, hf_to_based_t5_state, to_based_config
+from nai_t5_wrapper.sampling import BoundCachedDecode, MakeLogitGenerator, generate_greedy_cached, generate_until
 
 
 @dataclass
@@ -81,7 +81,7 @@ def main():
     max_new_tokens = 16
     seed = 42
 
-    run_hf_baseline = False
+    run_hf_baseline = True
     if run_hf_baseline:
         hf_t5.to(device)
 
@@ -117,51 +117,45 @@ def main():
     ####
     torch.manual_seed(seed)
 
-    batch_size = 1
-    use_based_encoder = True
-    use_based_decoder = True
-    if not run_hf_baseline:
-        if use_based_encoder:
-            hf_t5.encoder.to(device)
-        if use_based_decoder:
-            hf_t5.decoder.to(device)
     with inference_mode(), autocast(device_type=device.type, dtype=torch.bfloat16):
-        if use_based_encoder:
-            encoding: FloatTensor = my_t5.encoder(input_ids, input_mask=input_ids_mask.bool())
-        else:
-            encoding: FloatTensor = hf_t5.encoder.forward(
-                input_ids=input_ids, attention_mask=input_ids_mask
-            ).last_hidden_state
-        if use_based_decoder:
-            decoder_input_mask = encoding.new_ones((batch_size, max_new_tokens), dtype=torch.bool)
-            cross_mask = rearrange(input_ids_mask.bool(), "b k -> b 1 k")
-            cross_mask = cross_mask.expand(-1, max_new_tokens, -1)
+        encoding: FloatTensor = my_t5.encoder(input_ids, input_mask=input_ids_mask.bool())
+        cross_kv: FloatTensor = my_t5.decoder.get_cross_kv(encoding)
 
-    def decode(in_tokens: LongTensor, encoding: FloatTensor, input_ids_mask: BoolTensor) -> FloatTensor:
+    batch_size = 1
+    cross_mask = rearrange(input_ids_mask.bool(), "b k -> b 1 k")
+    cross_mask = cross_mask.expand(-1, max_new_tokens, -1)
+
+    # input_mask = encoding.new_ones((batch_size, max_new_tokens), dtype=torch.bool)
+
+    def decode(
+        in_tokens: LongTensor,
+        encoding: FloatTensor,
+        cross_mask: BoolTensor,
+        self_past_kv: FloatTensor,
+        cross_kv: FloatTensor,
+    ) -> FloatTensor:
         with inference_mode(), autocast(device_type=device.type, dtype=torch.bfloat16):
-            if use_based_decoder:
-                decoder_input_embeds: FloatTensor = my_t5.encoder.vocab_embed(in_tokens)
-                input_mask: BoolTensor = decoder_input_mask[:, : in_tokens.size(-1)]
-                cross_mask_: BoolTensor = cross_mask[:, : in_tokens.size(-1), :]
-                decoder_out: FloatTensor = my_t5.decoder(
-                    decoder_input_embeds,
-                    encoding,
-                    input_mask=input_mask,
-                    cross_mask=cross_mask_,
-                )
-                logits: FloatTensor = my_t5.lm_head(decoder_out)
-            else:
-                hidden_states: FloatTensor = hf_t5.decoder.forward(
-                    input_ids=in_tokens,
-                    attention_mask=None,
-                    encoder_hidden_states=encoding,
-                    encoder_attention_mask=input_ids_mask,
-                ).last_hidden_state
-                logits: FloatTensor = hf_t5.lm_head(hidden_states)
+            decoder_input_embeds: FloatTensor = my_t5.encoder.vocab_embed(in_tokens)
+            # input_mask_: BoolTensor = input_mask[:, : in_tokens.size(-1)]
+            cross_mask_: BoolTensor = cross_mask[:, : in_tokens.size(-1), :]
+            decoder_out: FloatTensor = my_t5.decoder(
+                decoder_input_embeds,
+                encoding,
+                # input_mask=input_mask_,
+                input_mask=None,
+                cross_mask=cross_mask_,
+                self_past_kv=self_past_kv,
+                cross_kv=cross_kv,
+            )
+            logits: FloatTensor = my_t5.lm_head(decoder_out)
             return logits
 
-    bound_decode: BoundDecode = partial(decode, encoding=encoding, input_ids_mask=input_ids_mask)
-    make_gen: MakeLogitGenerator = partial(generate_greedy, decode=bound_decode)
+    self_past_kv: FloatTensor = my_t5.decoder.get_kv_cache(
+        length=max_new_tokens, device=encoding.device, dtype=encoding.dtype
+    )
+
+    bound_decode: BoundCachedDecode = partial(decode, encoding=encoding, cross_mask=cross_mask, cross_kv=cross_kv)
+    make_gen: MakeLogitGenerator = partial(generate_greedy_cached, decode=bound_decode, self_past_kv=self_past_kv)
 
     gen: Generator[LongTensor, None, LongTensor] = generate_until(
         make_gen=make_gen,
@@ -180,12 +174,10 @@ def main():
         my_acc.append(token_id)
         assert (
             token_id == expected_tok
-        ), f"our sampler's output (sampling from {'NAI' if use_based_encoder else 'HF'} encoder, {'NAI' if use_based_decoder else 'HF'} decoder) diverged from HF output at prediction index {ix}. Expected token {expected_tok} ({hf_tokenizer.convert_ids_to_tokens(expected_tok)}). actual: {token_id} ({token_str})"
+        ), f"based output diverged from HF output at prediction index {ix}. Expected token {expected_tok} ({hf_tokenizer.convert_ids_to_tokens(expected_tok)}). actual: {token_id} ({token_str})"
     else:
         print("", flush=True)
-        assert (
-            my_acc == generate_out[0, 1:].tolist()
-        ), f"our sampler's output (sampling from {'NAI' if use_based_encoder else 'HF'} encoder, {'NAI' if use_based_decoder else 'HF'} decoder) diverged from HF output"
+        assert my_acc == generate_out[0, 1:].tolist(), f"based output diverged from HF output"
     pass  # somewhere to put your breakpoint
 
 

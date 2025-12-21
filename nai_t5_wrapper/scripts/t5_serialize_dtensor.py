@@ -17,7 +17,7 @@ from torch.distributed._tensor import init_device_mesh
 from torch.distributed.device_mesh import DeviceMesh
 from tensorizer import TensorDeserializer
 
-from nai_t5 import T5, T5EncoderStack, T5Config
+from nai_t5_wrapper import T5, T5EncoderStack, T5Config
 
 class ExportTarget(str, Enum):
     Enc = 'enc'

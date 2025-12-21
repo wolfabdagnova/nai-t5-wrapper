@@ -5,9 +5,9 @@ import torch
 from torch.nn import Embedding
 from einops import rearrange
 
-from nai_t5.t5_common import _relative_position, _relative_position_bucket
-from nai_t5.t5_encoder import T5EncoderSelfAttentionFlex
-from nai_t5.flex_utils import ScoreMod, create_bias
+from nai_t5_wrapper.t5_common import _relative_position, _relative_position_bucket
+from nai_t5_wrapper.t5_encoder import T5EncoderSelfAttentionFlex
+from nai_t5_wrapper.flex_utils import ScoreMod, create_bias
 
 device = torch.device('cuda')
 ctx_len = 512
