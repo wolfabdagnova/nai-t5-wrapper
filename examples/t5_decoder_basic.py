@@ -8,10 +8,10 @@ from torch import BoolTensor, FloatTensor, IntTensor, inference_mode
 from tensorizer import TensorDeserializer
 from sentencepiece import SentencePieceProcessor
 
-from nai_t5 import T5, T5Config
-from nai_t5.t5_decoder import T5DecoderStack
-from nai_t5.t5_encoder import T5EncoderStack
-from nai_t5.sampling import BoundCachedDecode, MakeLogitGenerator, generate_greedy_cached, generate_until
+from nai_t5_wrapper import T5, T5Config
+from nai_t5_wrapper.t5_decoder import T5DecoderStack
+from nai_t5_wrapper.t5_encoder import T5EncoderStack
+from nai_t5_wrapper.sampling import BoundCachedDecode, MakeLogitGenerator, generate_greedy_cached, generate_until
 
 t5_dir = Path('ckpt/goog-t5-v1.1-small-bf16')
 

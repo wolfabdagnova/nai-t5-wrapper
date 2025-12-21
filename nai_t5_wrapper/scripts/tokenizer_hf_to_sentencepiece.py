@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import argparse
-from nai_t5.sp_add_mask_vocab import add_mask_vocab
+from nai_t5_wrapper.sp_add_mask_vocab import add_mask_vocab
 
 
 def main():

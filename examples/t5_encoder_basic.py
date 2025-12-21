@@ -6,7 +6,7 @@ from torch import BoolTensor, FloatTensor, IntTensor, inference_mode
 from tensorizer import TensorDeserializer
 from sentencepiece import SentencePieceProcessor
 
-from nai_t5 import T5Config, T5EncoderStack
+from nai_t5_wrapper import T5Config, T5EncoderStack
 
 t5_dir = Path('ckpt/goog-t5-v1.1-small-bf16')
 

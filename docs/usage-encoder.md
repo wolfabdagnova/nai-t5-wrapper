@@ -27,7 +27,7 @@ We considered [a few approaches](https://github.com/pytorch/pytorch/issues/13849
 Before constructing the model, update the config to use flex.
 
 ```diff
-+ from nai_t5.t5_common import T5AttnImpl
++ from nai_t5_wrapper.t5_common import T5AttnImpl
 
   config: T5Config = T5Config.model_validate(conf_dict)
 + config = config.model_copy(update={
@@ -54,7 +54,7 @@ _You don't need to pass the regular boolean mask in any more; flex doesn't look 
 
 ```diff
 + from torch.nn.attention.flex_attention import BlockMask
-+ from nai_t5.t5_encoder import make_self_attn_block_mask
++ from nai_t5_wrapper.t5_encoder import make_self_attn_block_mask
 
   mask: BoolTensor = input_ids != tokenizer.pad_id()
 + block_mask: BlockMask = make_self_attn_block_mask(
@@ -77,7 +77,7 @@ _This optimization is included in [`t5_encoder_fast.py`](../examples/t5_encoder_
 We can fuse RMSNorm scales into the weights of whatever Linear projection occurs after them, reducing latency and exposing you to fewer instances of floating-point rounding.
 
 ```diff
-+ from nai_t5.fuse_norm_scales import fuse_norm_scales_enc
++ from nai_t5_wrapper.fuse_norm_scales import fuse_norm_scales_enc
 
   deserializer = TensorDeserializer(t5_dir / 'enc.tensors', lazy_load=True, dtype=dtype, device=device)
   deserializer.load_into_module(t5_enc)
@@ -115,7 +115,7 @@ When loading weights onto the model, specify `fuse_norm_scales=True`.
 
 ```diff
 - from tensorizer import TensorDeserializer
-+ from nai_t5.weight_load import FusingDeserializer
++ from nai_t5_wrapper.weight_load import FusingDeserializer
 
 - deserializer = TensorDeserializer(t5_dir / 'enc.tensors', lazy_load=True, dtype=dtype, device=device)
 - deserializer.load_into_module(t5_enc)
@@ -144,7 +144,7 @@ _You can also fuse norm scales with the FusingDeserializer here, as above._
 
 ```diff
 - from tensorizer import TensorDeserializer
-+ from nai_t5.weight_load import FusingDeserializer
++ from nai_t5_wrapper.weight_load import FusingDeserializer
 
 - deserializer = TensorDeserializer(t5_dir / 'enc.tensors', lazy_load=True, dtype=dtype, device=device)
 - deserializer.load_into_module(t5_enc)
@@ -158,12 +158,12 @@ _You can also fuse norm scales with the FusingDeserializer here, as above._
   deserializer.close()
 ```
 
-If you still encounter NaN outputs despite this: try using [`../nai_t5/scripts/t5_encoder_precision_parity.py`](../nai_t5/scripts/t5_encoder_precision_parity.py) to encode your prompt, and take note of the layer at which non-finite values are reported. Reduce scales at that layer and try again.
+If you still encounter NaN outputs despite this: try using [`../nai_t5_wrapper/scripts/t5_encoder_precision_parity.py`](../nai_t5_wrapper/scripts/t5_encoder_precision_parity.py) to encode your prompt, and take note of the layer at which non-finite values are reported. Reduce scales at that layer and try again.
 
 The same script includes suggested scales for T5v1.1 small, XL, and XXL.  
 These scales are chosen to be the smallest power-of-2 changes that allow the test sequence to be encoded, with the priority being to preserve float16 accuracy by not shrinking more than necessary. Consequently no headroom has been reserved, so it is possible that other prompts could exceed float16 range. The hope is that exposing control of this enables exploration.
 
-[`scripts/t5_encdec_precision_parity.py`](../nai_t5/scripts/t5_encdec_precision_parity.py) likewise includes suggested _decoder_ scales for T5v1.1 small, XL, and XXL.
+[`scripts/t5_encdec_precision_parity.py`](../nai_t5_wrapper/scripts/t5_encdec_precision_parity.py) likewise includes suggested _decoder_ scales for T5v1.1 small, XL, and XXL.
 
 ### Compilation
 
@@ -180,6 +180,6 @@ Ensure that you use a fixed input size (i.e. pad to a fixed context length to ke
 
 ### FSDP
 
-[`t5_encoder_parity_fsdp.py`](../nai_t5/scripts/t5_encoder_parity_fsdp.py) demonstrates how to load the model in FSDP or FSDP2 from a distributed checkpoint.
+[`t5_encoder_parity_fsdp.py`](../nai_t5_wrapper/scripts/t5_encoder_parity_fsdp.py) demonstrates how to load the model in FSDP or FSDP2 from a distributed checkpoint.
 
-[`t5_serialize_dtensor.py`](../nai_t5/scripts/t5_serialize_dtensor.py) can be used to convert a tensorizer checkpoint into a sharded distributed tensor checkpoint.
+[`t5_serialize_dtensor.py`](../nai_t5_wrapper/scripts/t5_serialize_dtensor.py) can be used to convert a tensorizer checkpoint into a sharded distributed tensor checkpoint.

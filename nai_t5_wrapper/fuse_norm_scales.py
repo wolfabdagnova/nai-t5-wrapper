@@ -4,10 +4,10 @@ import torch
 from torch import FloatTensor, inference_mode
 from torch.nn import Linear
 
-from nai_t5 import T5
-from nai_t5.t5_encoder import T5EncoderStack, T5EncoderLayer
-from nai_t5.t5_decoder import T5DecoderStack, T5DecoderLayer
-from nai_t5.t5_common import RMSNormCast
+from nai_t5_wrapper import T5
+from nai_t5_wrapper.t5_encoder import T5EncoderStack, T5EncoderLayer
+from nai_t5_wrapper.t5_decoder import T5DecoderStack, T5DecoderLayer
+from nai_t5_wrapper.t5_common import RMSNormCast
 
 class NormAndScale(NamedTuple):
     ln: RMSNormCast

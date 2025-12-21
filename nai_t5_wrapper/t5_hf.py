@@ -15,8 +15,24 @@ if TYPE_CHECKING:
 else:
     T5ConfigHF = Any
 
+# Supported model types and their characteristics
+# - t5: Original T5, shared position embeddings
+# - mt5: Multilingual T5, same architecture as T5
+# - umt5: Unified Multilingual T5, per-layer position embeddings
+SUPPORTED_MODEL_TYPES = {'t5', 'mt5', 'umt5'}
+
 
 def to_based_config(hf_config: T5ConfigHF, n_tokens=512, device=torch.device("cpu")) -> T5Config:
+    model_type = getattr(hf_config, 'model_type', 't5')
+    if model_type not in SUPPORTED_MODEL_TYPES:
+        raise ValueError(
+            f"Unsupported model_type '{model_type}'. "
+            f"Supported types: {SUPPORTED_MODEL_TYPES}"
+        )
+
+    # UMT5 uses per-layer position embeddings, T5 and MT5 share them
+    pos_emb_per_layer = model_type == 'umt5'
+
     return T5Config(
         vocab_size=hf_config.vocab_size,
         hidden_dim=hf_config.d_model,
@@ -38,7 +54,7 @@ def to_based_config(hf_config: T5ConfigHF, n_tokens=512, device=torch.device("cp
         label_ignore_index=-100,
         n_tokens=n_tokens,
         device=device,
-        pos_emb_per_layer=hf_config.model_type == 'umt5',
+        pos_emb_per_layer=pos_emb_per_layer,
     )
 
 

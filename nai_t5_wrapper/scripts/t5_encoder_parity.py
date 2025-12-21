@@ -14,8 +14,8 @@ from transformers.tokenization_utils_base import BatchEncoding
 from enum import Enum
 from contextlib import nullcontext
 
-from nai_t5 import T5Config, T5EncoderStack
-from nai_t5.t5_hf import (
+from nai_t5_wrapper import T5Config, T5EncoderStack
+from nai_t5_wrapper.t5_hf import (
     hf_to_based_t5_enc_state,
     to_based_config,
     replace_gates,

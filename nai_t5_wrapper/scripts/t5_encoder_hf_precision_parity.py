@@ -12,19 +12,22 @@ from torch.nn import RMSNorm
 from torch.amp.autocast_mode import autocast
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from tensorizer import TensorDeserializer
+from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
+from transformers.models.t5 import T5EncoderModel as HFT5EncoderModel
+from transformers.models.umt5 import UMT5EncoderModel
 from sentencepiece import SentencePieceProcessor
 
-from nai_t5 import T5Config, T5
-from nai_t5.t5_common import RMSNormCast
-from nai_t5.weight_load import FusingDeserializer
-from nai_t5.replace_linear import replace_linear
-from nai_t5.checkpoint_info import (
+from nai_t5_wrapper import T5Config, T5EncoderStack
+from nai_t5_wrapper.t5_common import RMSNormCast
+from nai_t5_wrapper.weight_load import FusingDeserializer
+from nai_t5_wrapper.replace_linear import replace_linear
+from nai_t5_wrapper.t5_hf import replace_gates, replace_norms
+from nai_t5_wrapper.checkpoint_info import (
     Checkpoint,
-    enc_ffn_out_scale_dict,
     enc_attn_out_scale_dict,
-    dec_self_attn_out_scale_dict,
-    dec_cross_attn_out_scale_dict,
-    dec_ffn_out_scale_dict,
+    enc_ffn_out_scale_dict,
+    ckpt_to_hf_model_name,
+    ckpt_is_umt5,
 )
 
 from torch import Tensor
@@ -60,8 +63,8 @@ class PrecisionMode(str, Enum):
     PureF16 = 'pure-f16'
 
 
-class EncDecAndConfig(NamedTuple):
-    enc: T5
+class EncAndConfig(NamedTuple):
+    enc: T5EncoderStack
     conf: T5Config
 
 
@@ -72,41 +75,29 @@ def get_model(
     norm_fusion_via_f32 = False,
     enc_attn_out_scales: Optional[list[float]] = None,
     enc_ffn_out_scales: Optional[list[float]] = None,
-    dec_self_attn_out_scales: Optional[list[float]] = None,
-    dec_cross_attn_out_scales: Optional[list[float]] = None,
-    dec_ffn_out_scales: Optional[list[float]] = None,
-) -> EncDecAndConfig:
+) -> EncAndConfig:
     with open(dir / 'config.json', 'r') as f:
         conf_dict: dict[str, Any] = json.load(f)
     config: T5Config = T5Config.model_validate(conf_dict)
     config.elementwise_affine = not fuse_norm_scales
 
     with torch.device('meta'):
-        encdec: T5 = T5(config).eval()
+        enc: T5EncoderStack = T5EncoderStack(config).eval()
 
-    if (
-        enc_ffn_out_scales is not None or
-        enc_attn_out_scales is not None or
-        dec_self_attn_out_scales is not None or
-        dec_cross_attn_out_scales is not None or
-        dec_ffn_out_scales is not None
-    ):
-        deserializer = FusingDeserializer(dir / 'encdec.tensors', lazy_load=True, dtype=dtype)
+    if enc_ffn_out_scales is not None or enc_attn_out_scales is not None:
+        deserializer = FusingDeserializer(dir / 'enc.tensors', lazy_load=True, dtype=dtype)
         deserializer.load_with_fusions(
-            encdec,
+            enc,
             fuse_norm_scales=fuse_norm_scales,
             norm_fusion_via_f32=norm_fusion_via_f32,
             enc_attn_out_scales=enc_attn_out_scales,
             enc_ffn_out_scales=enc_ffn_out_scales,
-            dec_self_attn_out_scales=dec_self_attn_out_scales,
-            dec_cross_attn_out_scales=dec_cross_attn_out_scales,
-            dec_ffn_out_scales=dec_ffn_out_scales,
         )
     else:
-        deserializer = TensorDeserializer(dir / 'encdec.tensors', lazy_load=True, dtype=dtype)
-        deserializer.load_into_module(encdec)
+        deserializer = TensorDeserializer(dir / 'enc.tensors', lazy_load=True, dtype=dtype)
+        deserializer.load_into_module(enc)
     deserializer.close()
-    return EncDecAndConfig(encdec, config)
+    return EncAndConfig(enc, config)
 
 def explain_diff(ref: FloatTensor, candidate: FloatTensor) -> FloatTensor:
     diff = ref.float().sub(candidate.float())
@@ -139,24 +130,72 @@ class VoidList(list[T]):
     def append(self, _: T) -> None:
         pass
 
+class PrecisionMode(str, Enum):
+    Float32 = 'float32'
+    MixedBF16 = 'mixed-bf16'
+    MixedFP16 = 'mixed-fp16'
+    PureBF16 = 'pure-bf16'
+    PureFP16 = 'pure-fp16'
+
+def get_hf_model(
+    ckpt: Checkpoint,
+    precision_mode: PrecisionMode,
+    device: torch.device | str | int,
+    do_replace_norms = False,
+    do_replace_gates = False,
+) -> HFT5EncoderModel | UMT5EncoderModel:
+    hf_model_name: str = ckpt_to_hf_model_name[ckpt]
+    is_umt5: bool = ckpt_is_umt5[ckpt]
+
+    match precision_mode:
+        case PrecisionMode.Float32 | PrecisionMode.MixedBF16 | PrecisionMode.MixedFP16:
+            hf_dtype_kwargs = {}
+        case PrecisionMode.PureBF16:
+            hf_dtype_kwargs = {'torch_dtype': torch.bfloat16}
+        case PrecisionMode.PureFP16:
+            hf_dtype_kwargs = {'torch_dtype': torch.float16}
+        case _:
+            raise ValueError(f"Invalid precision mode: {precision_mode}")
+
+    hf_enc: HFT5EncoderModel | UMT5EncoderModel
+    if is_umt5:
+        hf_enc = UMT5EncoderModel.from_pretrained(hf_model_name, **hf_dtype_kwargs, device_map=device).eval()
+    else:
+        hf_enc = HFT5EncoderModel.from_pretrained(hf_model_name, **hf_dtype_kwargs, device_map=device).eval()
+    
+    # make HF's norms and gates match ours, so that we're only comparing "everything else" (we already know our norms and gates are subtly different)
+    if do_replace_norms:
+        replace_norms(hf_enc)
+    if do_replace_gates:
+        replace_gates(hf_enc)
+    
+    return hf_enc
+
+def get_autocast_ctx(precision_mode: Optional[PrecisionMode], device: torch.device) -> autocast | nullcontext:
+    match precision_mode:
+        case None | PrecisionMode.Float32 | PrecisionMode.PureBF16 | PrecisionMode.PureFP16:
+            return nullcontext()
+        case PrecisionMode.MixedFP16:
+            return autocast(device_type=device.type, dtype=torch.float16)
+        case PrecisionMode.MixedBF16:
+            return autocast(device_type=device.type, dtype=torch.bfloat16)
+        case _:
+            raise ValueError(f"Invalid precision mode: {precision_mode}")
+
 def main():
     device = torch.device("cuda")
 
-    # ckpt = Checkpoint.T5v1_1XL
-    ckpt = Checkpoint.T5v1_1Small
-    # ckpt = Checkpoint.T5v1_1XXL
+    ckpt = Checkpoint.T5v1_1XL
     match ckpt:
         case Checkpoint.T5v1_1Small:
-            f32_needs_cast = f16_needs_cast = True
-            bf16_needs_cast = False
-            f32_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog/t5-v1_1-small-bf16')
-            f16_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog/t5-v1_1-small-bf16')
+            f32_needs_cast = f16_needs_cast = bf16_needs_cast = False
+            f32_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog/t5-v1_1-small-f32')
+            f16_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog/t5-v1_1-small-f16')
             bf16_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog/t5-v1_1-small-bf16')
         case Checkpoint.T5v1_1XL:
-            f32_needs_cast = f16_needs_cast = True
-            bf16_needs_cast = False
-            f32_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog/t5-v1_1-xl-bf16')
-            f16_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog/t5-v1_1-xl-bf16')
+            f32_needs_cast = f16_needs_cast = bf16_needs_cast = False
+            f32_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog/t5-v1_1-xl-f32')
+            f16_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog/t5-v1_1-xl-f16')
             bf16_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog/t5-v1_1-xl-bf16')
         case Checkpoint.T5v1_1XXL:
             f32_needs_cast = f16_needs_cast = True
@@ -165,13 +204,11 @@ def main():
             f16_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog/t5-v1_1-xxl-bf16')
             bf16_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog/t5-v1_1-xxl-bf16')
         case Checkpoint.T5v1Large:
-            raise NotImplementedError("haven't exported encdec weights for t5v1 large")
             f32_needs_cast = f16_needs_cast = bf16_needs_cast = False
             f32_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog-v1/t5-large-f32')
             f16_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog-v1/t5-large-f16')
             bf16_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/goog-v1/t5-large-bf16')
         case Checkpoint.PileT5Large:
-            raise NotImplementedError("haven't exported encdec weights for pile-t5 large")
             f32_needs_cast = f16_needs_cast = bf16_needs_cast = False
             f32_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/eleuther/pile-t5-large-f32')
             f16_dir = Path('/mnt/clusterstorage/models/nait5-tensorizer/eleuther/pile-t5-large-f16')
@@ -179,40 +216,71 @@ def main():
         case _:
             raise ValueError(f'unknown checkpoint: {ckpt}')
 
+    # we'll consider this the reference impl
+    hf_precision_mode = PrecisionMode.Float32
+    # hf_precision_mode = PrecisionMode.MixedBF16
+    # hf_precision_mode = PrecisionMode.MixedFP16
+    # hf_precision_mode = PrecisionMode.PureBF16
+
+    # also let us compare HF against itself
+    hf_alt_precision_mode: Optional[PrecisionMode]
+    # hf_alt_precision_mode = None
+    hf_alt_precision_mode = PrecisionMode.PureBF16
+    # hf_alt_precision_mode = PrecisionMode.MixedBF16
+    # hf_alt_precision_mode = PrecisionMode.MixedFP16
+    # hf_alt_precision_mode = PrecisionMode.PureFP16
+        
+    nai_f32_precision_mode = hf_precision_mode
+
+    hf_enc: HFT5EncoderModel | UMT5EncoderModel = get_hf_model(
+        ckpt,
+        precision_mode=hf_precision_mode,
+        device=device,
+        do_replace_norms=False,
+        do_replace_gates=False,
+    )
+    hf_alt_enc: HFT5EncoderModel | UMT5EncoderModel | None = None
+    if hf_alt_precision_mode is not None:
+        hf_alt_enc: HFT5EncoderModel | UMT5EncoderModel = get_hf_model(
+            ckpt,
+            precision_mode=hf_alt_precision_mode,
+            device=device,
+            do_replace_norms=False,
+            do_replace_gates=False,
+        )
+
     fuse_norms = True
 
-    do_autocast = False
-    f32_t5: Optional[T5] = None
-    f16_t5: Optional[T5] = None
-    bf16_t5: Optional[T5] = None
+    f32_enc: Optional[T5EncoderStack] = None
+    f16_enc: Optional[T5EncoderStack] = None
+    bf16_enc: Optional[T5EncoderStack] = None
     f32_config: Optional[T5Config] = None
     f16_config: Optional[T5Config] = None
     bf16_config: Optional[T5Config] = None
-    if f32_enabled := True:
+    # load if you intend to invoke the model, or if you intend to use it as a weight donor.
+    # if you're loading it anyway, then we designate it as avaiable for weight donation too.
+    if f32_enabled := False:
         dtype: Optional[torch.dtype] = torch.float32 if f32_needs_cast else None
-        f32_t5, f32_config = get_model(f32_dir, dtype=dtype)
+        f32_enc, f32_config = get_model(f32_dir, dtype=dtype)
     if f16_enabled := True:
         dtype: Optional[torch.dtype] = torch.float16 if f16_needs_cast else None
-        f16_t5, f16_config = get_model(
+        f16_enc, f16_config = get_model(
             f16_dir,
             dtype=dtype,
             fuse_norm_scales=fuse_norms,
             norm_fusion_via_f32=True,
             enc_attn_out_scales=enc_attn_out_scale_dict[ckpt],
             enc_ffn_out_scales=enc_ffn_out_scale_dict[ckpt],
-            dec_self_attn_out_scales=dec_self_attn_out_scale_dict[ckpt],
-            dec_cross_attn_out_scales=dec_cross_attn_out_scale_dict[ckpt],
-            dec_ffn_out_scales=dec_ffn_out_scale_dict[ckpt],
         )
         if f16_acc_gpupoor := False:
             from gpu_poor.modules import LowPrecisionLinear
-            replace_linear(f16_t5, LowPrecisionLinear)
+            replace_linear(f16_enc, LowPrecisionLinear)
         if f16_acc_cublas_ops := False:
             from cublas_ops import CublasLinear
-            replace_linear(f16_t5, CublasLinear)
+            replace_linear(f16_enc, CublasLinear)
     if bf16_enabled := False:
         dtype: Optional[torch.dtype] = torch.bfloat16 if bf16_needs_cast else None
-        bf16_t5, bf16_config = get_model(bf16_dir)
+        bf16_enc, bf16_config = get_model(bf16_dir)
     
     print_first_block_only = False
 
@@ -222,11 +290,10 @@ def main():
     f16_activations: list[NamedActivation] = [] if retain_activations else VoidList()
     bf16_activations: list[NamedActivation] = [] if retain_activations else VoidList()
 
-    def instrument_nai_t5(module: T5, config: T5Config, out_list: list[NamedActivation], model_name: str) -> Callable[[], None]:
+    def instrument_nai_t5(module: T5EncoderStack, config: T5Config, out_list: list[NamedActivation], model_name: str) -> Callable[[], None]:
         from torch.nn import GELU, Embedding, Linear
-        from nai_t5.t5_common import RMSNormCast, T5GEGLUFFN
-        from nai_t5.t5_encoder import T5EncoderLayer
-        from nai_t5.t5_decoder import T5DecoderLayer
+        from nai_t5_wrapper.t5_common import RMSNormCast, T5GEGLUFFN
+        from nai_t5_wrapper.t5_encoder import T5EncoderLayer
         handles: list[RemovableHandle] = []
         for name, mod in module.named_modules():
             match mod:
@@ -244,7 +311,7 @@ def main():
                     handle: RemovableHandle = mod.register_forward_hook(partial(hook, name=name))
                     handles.append(handle)
                 case Linear():
-                    if print_first_block_only and not name.removeprefix('encoder.').removeprefix('decoder.').startswith('layers.0'): continue
+                    if print_first_block_only and not name.startswith('layers.0'): continue
                     def hook(mod, args, output, name: str):
                         if name.endswith('qkv_proj'):
                             q, k, v = output.chunk(3, dim=-1)
@@ -276,8 +343,8 @@ def main():
                             print(f'{model_name} {name:35s}:', stats(output))
                     handle: RemovableHandle = mod.register_forward_hook(partial(hook, name=name))
                     handles.append(handle)
-                case T5DecoderLayer() | T5EncoderLayer():
-                    if print_first_block_only and name.removeprefix('encoder.').removeprefix('decoder.') != 'layers.0': continue
+                case T5EncoderLayer():
+                    if print_first_block_only and name != 'layers.0': continue
                     def hook(mod, args, output, name: str):
                         # out_list.append(NamedActivation(name, output))
                         # assert output.isfinite().all(), f'{model_name} {name} has non-finite values'
@@ -292,7 +359,7 @@ def main():
                     handle: RemovableHandle = mod.register_forward_hook(partial(hook, name=name))
                     handles.append(handle)
                 case RMSNormCast():
-                    if print_first_block_only and not name.removeprefix('encoder.').removeprefix('decoder.').startswith('layers.0'): continue
+                    if print_first_block_only and not name.startswith('layers.0'): continue
                     def hook(mod, args, kwargs: dict[str, Any], output, name: str):
                         # assert (name := kwargs.get('name', None)) is not None
                         (input,) = args
@@ -319,7 +386,7 @@ def main():
                     handle: RemovableHandle = mod.register_forward_hook(partial(hook, name=name), with_kwargs=True)
                     handles.append(handle)
                 case GELU():
-                    if print_first_block_only and not name.removeprefix('encoder.').removeprefix('decoder.').startswith('layers.0'): continue
+                    if print_first_block_only and not name.startswith('layers.0'): continue
                     def hook(mod, args, output, name: str):
                         out_list.append(NamedActivation(name, output))
                         assert output.isfinite().all(), f'{model_name} {name} has non-finite values'
@@ -327,7 +394,7 @@ def main():
                     handle: RemovableHandle = mod.register_forward_hook(partial(hook, name=name))
                     handles.append(handle)
                 case T5GEGLUFFN():
-                    if print_first_block_only and not name.removeprefix('encoder.').removeprefix('decoder.').startswith('layers.0'): continue
+                    if print_first_block_only and not name.startswith('layers.0'): continue
                     def hook(mod, args, output, name: str):
                         out_list.append(NamedActivation(name, output))
                         assert output.isfinite().all(), f'{model_name} {name} has non-finite values'
@@ -351,92 +418,85 @@ def main():
     for seq, input_out in zip(toks, input_ids.unbind()):
         input_out[:len(seq)].copy_(torch.tensor(seq[:ctx_len], dtype=torch.long))
     input_ids = input_ids.to(device)
-    # input_mask: BoolTensor = input_ids != tokenizer.pad_id()
-    input_mask: BoolTensor = torch.arange(ctx_len, device=device).expand(batch_size, -1) < torch.tensor([len(seq) for seq in toks], device=device).unsqueeze(-1)
-    decoder_input_ids: LongTensor = torch.full((batch_size, 1), fill_value=tokenizer.pad_id(), dtype=torch.long, device=device)
-    decoder_input_mask: LongTensor = torch.ones_like(decoder_input_ids, dtype=torch.bool)
-    # decoder_cross_mask: LongTensor = torch.ones((batch_size, decoder_input_ids.size(-1), input_ids.size(-1)), dtype=torch.bool, device=device)
-    decoder_cross_mask: Optional[LongTensor] = None
+    mask: BoolTensor = input_ids != tokenizer.pad_id()
+
+    hf_autocast_ctx = get_autocast_ctx(hf_precision_mode, device)
+    hf_alt_autocast_ctx = get_autocast_ctx(hf_alt_precision_mode, device)
+    nai_autocast_ctx = get_autocast_ctx(nai_f32_precision_mode, device)
 
     seed = 42
-    with (
-        inference_mode(),
-        fin(instrument_nai_t5(f32_t5, f32_config, f32_activations, ' f32')) if f32_enabled else nullcontext(),
-        fin(instrument_nai_t5(f16_t5, f16_config, f16_activations, ' f16')) if f16_enabled else nullcontext(),
-        fin(instrument_nai_t5(bf16_t5, bf16_config, bf16_activations, 'bf16')) if bf16_enabled else nullcontext(),
-        # sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION),
-        # sdpa_kernel(SDPBackend.CUDNN_ATTENTION),
-    ):
+    with inference_mode():
         torch.manual_seed(seed)
-        if f32_enabled:
-            with autocast(device_type=device.type, dtype=torch.float16) if do_autocast else nullcontext():
-                f32_enc_out: FloatTensor = f32_t5.encoder(
+        with hf_autocast_ctx:
+            hf_out_all: BaseModelOutputWithPastAndCrossAttentions = hf_enc(
+                input_ids=input_ids,
+                attention_mask=mask,
+                head_mask=None,
+                inputs_embeds=None,
+                output_attentions=None,
+                output_hidden_states=None,
+                return_dict=None,
+            )
+            hf_out: FloatTensor = hf_out_all.last_hidden_state
+            assert hf_out.isfinite().all(), 'hf_out has non-finite values'
+        if hf_alt_enc is not None:
+            torch.manual_seed(seed)
+            with hf_alt_autocast_ctx:
+                hf_alt_out_all: BaseModelOutputWithPastAndCrossAttentions = hf_alt_enc(
                     input_ids=input_ids,
-                    input_mask=input_mask,
+                    attention_mask=mask,
+                    head_mask=None,
+                    inputs_embeds=None,
+                    output_attentions=None,
+                    output_hidden_states=None,
+                    return_dict=None,
                 )
-                assert f32_enc_out.isfinite().all(), 'f32_enc_out has non-finite values'
-                f32_dec_input_emb = f32_t5.encoder.vocab_embed(decoder_input_ids.flatten(end_dim=-2))
-                f32_dec_out: FloatTensor = f32_t5.decoder(
-                    f32_dec_input_emb,
-                    f32_enc_out,
-                    input_mask=decoder_input_mask,
-                    cross_mask=decoder_cross_mask,
+                hf_alt_out: FloatTensor = hf_alt_out_all.last_hidden_state
+                assert hf_alt_out.isfinite().all(), 'hf_alt_out has non-finite values'
+        with (
+            fin(instrument_nai_t5(f32_enc, f32_config, f32_activations, ' f32')) if f32_enabled else nullcontext(),
+            fin(instrument_nai_t5(f16_enc, f16_config, f16_activations, ' f16')) if f16_enabled else nullcontext(),
+            fin(instrument_nai_t5(bf16_enc, bf16_config, bf16_activations, 'bf16')) if bf16_enabled else nullcontext(),
+            # sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION),
+            # sdpa_kernel(SDPBackend.CUDNN_ATTENTION),
+        ):
+            if f32_enabled:
+                torch.manual_seed(seed)
+                with nai_autocast_ctx:
+                    f32_out: FloatTensor = f32_enc(
+                        input_ids=input_ids,
+                        input_mask=mask,
+                    )
+                assert f32_out.isfinite().all(), 'f32_out has non-finite values'
+            if bf16_enabled:
+                torch.manual_seed(seed)
+                bf16_out: FloatTensor = bf16_enc(
+                    input_ids=input_ids,
+                    input_mask=mask,
                 )
-                f32_logits: FloatTensor = f32_t5.lm_head(f32_dec_out)
-        if bf16_enabled:
-            bf16_enc_out: FloatTensor = bf16_t5.encoder(
-                input_ids=input_ids,
-                input_mask=input_mask,
-            )
-            bf16_dec_input_emb = bf16_t5.encoder.vocab_embed(decoder_input_ids.flatten(end_dim=-2))
-            bf16_dec_out: FloatTensor = bf16_t5.decoder(
-                bf16_dec_input_emb,
-                bf16_enc_out,
-                input_mask=decoder_input_mask,
-                cross_mask=decoder_cross_mask,
-            )
-            bf16_logits: FloatTensor = bf16_t5.lm_head(bf16_dec_out)
-        if f16_enabled:
-            f16_enc_out: FloatTensor = f16_t5.encoder(
-                input_ids=input_ids,
-                input_mask=input_mask,
-            )
-            assert f16_enc_out.isfinite().all(), 'f16_out has non-finite values'
-            f16_dec_input_emb = f16_t5.encoder.vocab_embed(decoder_input_ids.flatten(end_dim=-2))
-            f16_dec_out: FloatTensor = f16_t5.decoder(
-                f16_dec_input_emb,
-                f16_enc_out,
-                input_mask=decoder_input_mask,
-                cross_mask=decoder_cross_mask,
-            )
-            f16_logits: FloatTensor = f16_t5.lm_head(f16_dec_out)
+            if f16_enabled:
+                torch.manual_seed(seed)
+                f16_out: FloatTensor = f16_enc(
+                    input_ids=input_ids,
+                    input_mask=mask,
+                )
+                assert f16_out.isfinite().all(), 'f16_out has non-finite values'
     
+    qs = torch.tensor([.5, .75, .9, .95, .99, .999, .9999], device=device)
+    print("absmax diff quantiles:")
+    print(str(qs.cpu()).removeprefix("tensor(").removesuffix(")"))
+    if hf_alt_enc is not None:
+        print(f'HF {hf_precision_mode.value} vs HF {hf_alt_precision_mode.value}:')
+        explain_diff(hf_out, hf_alt_out)
     if f32_enabled:
-        if bf16_enabled or f16_enabled:
-            qs = torch.tensor([.5, .75, .9, .95, .99, .999, .9999], device=device)
-            print("quantiles:")
-            print(str(qs.cpu()).removeprefix("tensor(").removesuffix(")"))
-        if f16_enabled:
-            print('f32 vs f16 enc:')
-            explain_diff(f32_enc_out, f16_enc_out)
-            print('f32 vs f16 dec:')
-            explain_diff(f32_dec_out, f16_dec_out)
-            print('f32 vs f16 logits:')
-            explain_diff(f32_logits, f16_logits)
-        if bf16_enabled:
-            print('f32 vs bf16 enc:')
-            explain_diff(f32_enc_out, bf16_enc_out)
-            print('f32 vs bf16 dec:')
-            explain_diff(f32_dec_out, bf16_dec_out)
-            print('f32 vs bf16 logits:')
-            explain_diff(f32_logits, bf16_logits)
-        if f32_activations and f16_activations:
-            print("abs differences between f32, f16 layer activations...")
-            torch.set_printoptions(linewidth=200)
-            for f32_act, f16_act in zip(f32_activations, f16_activations):
-                diff = f32_act.act.float().sub(f16_act.act.float())
-                absdiff = diff.abs()
-                print(f'{f32_act.name:35s}: {stats(absdiff):80s} {str(absdiff.quantile(qs).cpu()).removeprefix("tensor(").removesuffix(")")}')
+        print(f'HF {hf_precision_mode.value} vs NAI f32:')
+        explain_diff(hf_out, f32_out)
+    if f16_enabled:
+        print(f'HF {hf_precision_mode.value} vs NAI f16:')
+        explain_diff(hf_out, f16_out)
+    if bf16_enabled:
+        print(f'HF {hf_precision_mode.value} vs NAI bf16:')
+        explain_diff(hf_out, bf16_out)
     pass  # somewhere to put your breakpoint
 
 if __name__ == "__main__":

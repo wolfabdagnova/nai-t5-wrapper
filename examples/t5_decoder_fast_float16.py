@@ -8,13 +8,13 @@ from torch import BoolTensor, FloatTensor, IntTensor, inference_mode
 from torch.nn.attention.flex_attention import BlockMask
 from sentencepiece import SentencePieceProcessor
 
-from nai_t5 import T5, T5Config
-from nai_t5.t5_common import T5AttnImpl
-from nai_t5.t5_decoder import T5DecoderStack
-from nai_t5.t5_encoder import T5EncoderStack, make_self_attn_block_mask
-from nai_t5.sampling import BoundCachedDecode, MakeLogitGenerator, generate_greedy_cached, generate_until
-from nai_t5.weight_load import FusingDeserializer
-from nai_t5.checkpoint_info import (
+from nai_t5_wrapper import T5, T5Config
+from nai_t5_wrapper.t5_common import T5AttnImpl
+from nai_t5_wrapper.t5_decoder import T5DecoderStack
+from nai_t5_wrapper.t5_encoder import T5EncoderStack, make_self_attn_block_mask
+from nai_t5_wrapper.sampling import BoundCachedDecode, MakeLogitGenerator, generate_greedy_cached, generate_until
+from nai_t5_wrapper.weight_load import FusingDeserializer
+from nai_t5_wrapper.checkpoint_info import (
     Checkpoint,
     enc_ffn_out_scale_dict,
     enc_attn_out_scale_dict,

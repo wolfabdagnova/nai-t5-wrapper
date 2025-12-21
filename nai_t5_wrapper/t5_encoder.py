@@ -253,7 +253,7 @@ def make_self_attn_block_mask(
     mask_pad_queries=True,
     create_block_mask: CreateBlockMask = create_block_mask_c,
 ) -> BlockMask:
-    from nai_t5.t5_encoder import T5EncoderSelfAttentionFlex
+    from nai_t5_wrapper.t5_encoder import T5EncoderSelfAttentionFlex
     seq_len: int = mask.size(-1)
     make_mask_mod: Callable[[BoolTensor], MaskMod] = (
         T5EncoderSelfAttentionFlex.make_mask_mod_fast if mask_pad_queries else T5EncoderSelfAttentionFlex.make_mask_mod_compat

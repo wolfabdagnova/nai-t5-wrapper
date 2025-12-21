@@ -14,10 +14,10 @@ from triton.testing import do_bench
 from transformers.models.t5.configuration_t5 import T5Config as T5ConfigHF
 from transformers.models.t5 import T5EncoderModel as HFT5EncoderModel
 import tabulate
-from nai_t5 import T5Config, to_based_config
-from nai_t5.t5_encoder import T5EncoderStack
-from nai_t5.t5_common import T5AttnImpl
-from nai_t5.replace_linear import replace_linear
+from nai_t5_wrapper import T5Config, to_based_config
+from nai_t5_wrapper.t5_encoder import T5EncoderStack
+from nai_t5_wrapper.t5_common import T5AttnImpl
+from nai_t5_wrapper.replace_linear import replace_linear
 
 
 if TYPE_CHECKING:
@@ -155,7 +155,7 @@ def main(args: Args):
             replace_linear(nai_enc_flex, LowPrecisionLinear)
         nai_enc_flex.bind_score_mods(args.ctx_len)
         def bind_nai_flex_fwd(nai_enc: T5EncoderStack) -> NiladicModelFwd:
-            from nai_t5.t5_encoder import make_self_attn_block_mask
+            from nai_t5_wrapper.t5_encoder import make_self_attn_block_mask
             def fwd() -> FloatTensor:
                 if args.disable_block_mask:
                     block_mask: Optional[BlockMask] = None
