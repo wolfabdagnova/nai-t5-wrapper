@@ -103,14 +103,21 @@ class NAIT5EncoderModel(nn.Module):
         except ImportError:
             return False
 
+    @staticmethod
+    def _is_hip() -> bool:
+        """Check if running on HIP/ROCm (AMD GPU)."""
+        return hasattr(torch.version, 'hip') and torch.version.hip is not None
+
     @classmethod
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: str,
-        torch_dtype: torch.dtype = torch.bfloat16,
+        dtype: torch.dtype = torch.bfloat16,
         device_map: Optional[str] = None,
         max_seq_len: int = 512,
         subfolder: Optional[str] = None,
+        torch_dtype: Optional[torch.dtype] = None,  # Deprecated, use dtype
+        use_flex_attention: Optional[bool] = None,  # None=auto, True=force, False=disable
         **kwargs,
     ) -> "NAIT5EncoderModel":
         """
@@ -119,15 +126,29 @@ class NAIT5EncoderModel(nn.Module):
         Args:
             pretrained_model_name_or_path: HuggingFace model ID (e.g., 'google/t5-v1_1-xxl',
                 'google/mt5-xxl', 'google/umt5-xxl')
-            torch_dtype: Model dtype (default: bfloat16)
+            dtype: Model dtype (default: bfloat16)
             device_map: Device placement (currently uses CUDA if available)
             max_seq_len: Maximum sequence length for Flex Attention (default: 512)
             subfolder: Subfolder within model repo (passed to HF, typically ignored)
+            torch_dtype: Deprecated, use dtype instead
+            use_flex_attention: Control Flex Attention usage (None=auto, True=force, False=disable).
+                For UMT5 on HIP/ROCm, Flex Attention is automatically disabled due to Triton compatibility
+                issues (HSA_STATUS_ERROR_EXCEPTION crashes). Set to True to force-enable anyway.
             **kwargs: Additional arguments (ignored)
 
         Returns:
             NAIT5EncoderModel instance with loaded weights
         """
+        # Handle deprecated torch_dtype parameter
+        if torch_dtype is not None:
+            import warnings
+            warnings.warn(
+                "`torch_dtype` is deprecated! Use `dtype` instead!",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            dtype = torch_dtype
+
         # Determine device
         if device_map == "auto" or device_map is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -135,15 +156,21 @@ class NAIT5EncoderModel(nn.Module):
             device = torch.device(device_map)
 
         # Create instance
-        instance = cls(max_seq_len=max_seq_len, dtype=torch_dtype, device=device)
+        instance = cls(max_seq_len=max_seq_len, dtype=dtype, device=device)
         instance._hf_model_id = pretrained_model_name_or_path
 
-        # Load the model
-        instance._load_model(pretrained_model_name_or_path, subfolder)
+        # Override Flex Attention detection if explicitly specified
+        if use_flex_attention is not None:
+            instance._supports_flex_attention = use_flex_attention
+
+        # Load the model (may disable Flex Attention for UMT5 on HIP)
+        instance._load_model(pretrained_model_name_or_path, subfolder, use_flex_attention)
 
         return instance
 
-    def _load_model(self, model_id: str, subfolder: Optional[str] = None):
+    def _load_model(
+        self, model_id: str, subfolder: Optional[str] = None, use_flex_attention: Optional[bool] = None
+    ):
         """Load and convert HuggingFace T5/MT5/UMT5 weights to NAI-T5 format."""
         from nai_t5_wrapper.t5_encoder import T5EncoderStack
         from nai_t5_wrapper.t5_hf import hf_to_based_t5_enc_state, to_based_config, SUPPORTED_MODEL_TYPES
@@ -165,6 +192,20 @@ class NAIT5EncoderModel(nn.Module):
             )
 
         logger.info(f"Detected model type: {self._model_type}")
+
+        # Auto-disable Flex Attention for UMT5 on HIP/ROCm due to Triton compatibility issues
+        if self._model_type == 'umt5' and self._supports_flex_attention and self._is_hip():
+            if use_flex_attention is True:
+                logger.warning(
+                    "UMT5 with Flex Attention on HIP/ROCm is unstable and may crash. "
+                    "You explicitly requested use_flex_attention=True, proceeding anyway."
+                )
+            else:
+                logger.warning(
+                    "Disabling Flex Attention for UMT5 on HIP/ROCm due to Triton compatibility issues. "
+                    "Falling back to SDPA."
+                )
+                self._supports_flex_attention = False
 
         # Build NAI-T5 config from HuggingFace config
         attn_impl = T5AttnImpl.Flex if self._supports_flex_attention else T5AttnImpl.SDPA
@@ -265,25 +306,28 @@ class NAIT5EncoderModel(nn.Module):
             input_mask = attention_mask.bool()
 
         # Forward through NAI-T5 encoder
-        if self._supports_flex_attention and input_mask is not None:
-            from nai_t5_wrapper.t5_encoder import make_self_attn_block_mask
-            from torch.nn.attention.flex_attention import create_block_mask
+        # Use no_grad since NAI-T5 is designed for inference, and flex attention
+        # has issues with inference_mode() (creates tensors that can't be saved for backward)
+        with torch.no_grad():
+            if self._supports_flex_attention and input_mask is not None:
+                from nai_t5_wrapper.t5_encoder import make_self_attn_block_mask
+                from torch.nn.attention.flex_attention import create_block_mask
 
-            # Use non-compiled create_block_mask for broader compatibility
-            block_mask = make_self_attn_block_mask(
-                mask=input_mask,
-                mask_pad_queries=True,
-                create_block_mask=create_block_mask,
-            )
-            hidden_states = self._encoder(
-                input_ids=input_ids,
-                block_mask=block_mask,
-            )
-        else:
-            hidden_states = self._encoder(
-                input_ids=input_ids,
-                input_mask=input_mask,
-            )
+                # Use non-compiled create_block_mask for broader compatibility
+                block_mask = make_self_attn_block_mask(
+                    mask=input_mask,
+                    mask_pad_queries=True,
+                    create_block_mask=create_block_mask,
+                )
+                hidden_states = self._encoder(
+                    input_ids=input_ids,
+                    block_mask=block_mask,
+                )
+            else:
+                hidden_states = self._encoder(
+                    input_ids=input_ids,
+                    input_mask=input_mask,
+                )
 
         return NAIT5EncoderOutput(last_hidden_state=hidden_states)
 

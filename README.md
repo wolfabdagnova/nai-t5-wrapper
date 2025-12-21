@@ -53,7 +53,7 @@ embeddings = output.last_hidden_state  # or output[0]
 model = NAIT5EncoderModel.from_pretrained('google/t5-v1_1-xxl', max_seq_len=256)
 
 # Custom dtype
-model = NAIT5EncoderModel.from_pretrained('google/t5-v1_1-xxl', torch_dtype=torch.float16)
+model = NAIT5EncoderModel.from_pretrained('google/t5-v1_1-xxl', dtype=torch.float16)
 
 # Compile for additional speedup
 model = NAIT5EncoderModel.from_pretrained('google/t5-v1_1-xxl').compile()
