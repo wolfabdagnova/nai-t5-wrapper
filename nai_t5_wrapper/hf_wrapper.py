@@ -25,8 +25,8 @@ from torch import BoolTensor, FloatTensor, LongTensor, nn
 
 logger = logging.getLogger(__name__)
 
-# Supported model types
-SUPPORTED_MODEL_TYPES = {'t5', 'mt5', 'umt5'}
+# Import supported model types from the canonical source
+from nai_t5_wrapper.t5_hf import SUPPORTED_MODEL_TYPES
 
 
 @dataclass
@@ -143,7 +143,7 @@ class NAIT5EncoderModel(nn.Module):
         if torch_dtype is not None:
             import warnings
             warnings.warn(
-                "`torch_dtype` is deprecated! Use `dtype` instead!",
+                "torch_dtype is deprecated, use dtype instead",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -173,7 +173,7 @@ class NAIT5EncoderModel(nn.Module):
     ):
         """Load and convert HuggingFace T5/MT5/UMT5 weights to NAI-T5 format."""
         from nai_t5_wrapper.t5_encoder import T5EncoderStack
-        from nai_t5_wrapper.t5_hf import hf_to_based_t5_enc_state, to_based_config, SUPPORTED_MODEL_TYPES
+        from nai_t5_wrapper.t5_hf import hf_to_based_t5_enc_state, to_based_config
         from nai_t5_wrapper.t5_common import T5AttnImpl
         from nai_t5_wrapper.fuse_norm_scales import fuse_norm_scales_enc
 
@@ -209,11 +209,15 @@ class NAIT5EncoderModel(nn.Module):
 
         # Build NAI-T5 config from HuggingFace config
         attn_impl = T5AttnImpl.Flex if self._supports_flex_attention else T5AttnImpl.SDPA
-        if not self._supports_flex_attention:
-            logger.warning(
-                "Flex Attention not available (requires PyTorch 2.5+). "
-                "Falling back to SDPA. Performance may be reduced."
-            )
+
+        # Only warn about missing Flex Attention if it wasn't explicitly disabled
+        # and wasn't auto-disabled for UMT5 on HIP (those cases already logged)
+        if not self._supports_flex_attention and use_flex_attention is None:
+            if not self._check_flex_attention_support():
+                logger.warning(
+                    "Flex Attention not available (requires PyTorch 2.5+). "
+                    "Falling back to SDPA. Performance may be reduced."
+                )
 
         # Convert HF config to NAI-T5 config
         self._config = to_based_config(hf_config, n_tokens=self._max_seq_len)
