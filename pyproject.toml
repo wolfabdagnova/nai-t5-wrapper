@@ -50,7 +50,6 @@ dependencies = [
     "torch>=2.0",
     "einops",
     "pydantic",
-    "transformers",
 ]
 
 [project.urls]
@@ -58,7 +57,7 @@ dependencies = [
 "Issue Tracker" = "https://github.com/bghira/nai-t5-wrapper/issues"
 
 [project.optional-dependencies]
-hf = ["transformers", "tokenizers"]
+hf = ["transformers>=4.40", "tokenizers"]
 sp = ["sentencepiece"]
 tensorizer = ["tensorizer"]
 bench = ["tabulate", "triton"]
