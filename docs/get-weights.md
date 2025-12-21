@@ -8,7 +8,7 @@ pip install transformers tokenizers
 pip install huggingface_hub[hf_transfer]
 ```
 
-We assume you have already installed the `nai-t5` pip package, which should put the [`t5_serialize.py`](../nai_t5/scripts/t5_serialize.py) script should on your shell's `PATH`.
+We assume you have already installed the `nai-t5-wrapper` pip package, which should put the [`t5_serialize.py`](../nai_t5_wrapper/scripts/t5_serialize.py) script on your shell's `PATH`.
 
 You can export the t5 v1.1 small encoder like so:
 
@@ -27,7 +27,7 @@ ckpt/goog-t5-v1.1-small-bf16/spiece.model # Sentencepiece model for T5 tokenizat
 
 `--weight-dtype bfloat16` can be changed to `--weight-dtype float16` if you intend to inference in float16 and wish to cast the weights ahead-of-time and save them, rather than casting them as you load your model.
 
-[`t5_serialize.py`](../nai_t5/scripts/t5_serialize.py) supports also an `--encdec` option to export encoder-decoder weights. This can be used simultaneously with `--enc` to output both `enc.tensors` and `encdec.tensors`.
+[`t5_serialize.py`](../nai_t5_wrapper/scripts/t5_serialize.py) supports also an `--encdec` option to export encoder-decoder weights. This can be used simultaneously with `--enc` to output both `enc.tensors` and `encdec.tensors`.
 
 It also supports a `--dtensor` option to export the checkpoint as a distributed checkpoint (which can be loaded in pytorch without further dependencies).
 
@@ -36,4 +36,4 @@ Huggingface distributes them in float32, perhaps for compatibility reasons, but 
 The range of values in the weights is not excessive, so should cast to float16 comfortably.
 
 **FSDP**:  
-[`t5_serialize_dtensor.py`](../nai_t5/scripts/t5_serialize_dtensor.py) supports loading a tensorizer checkpoint and converting it into a _sharded_ distributed tensor checkpoint. This enables multi-device deployments to load just their own shard of the weights, for FSDP-sharded inference.
+[`t5_serialize_dtensor.py`](../nai_t5_wrapper/scripts/t5_serialize_dtensor.py) supports loading a tensorizer checkpoint and converting it into a _sharded_ distributed tensor checkpoint. This enables multi-device deployments to load just their own shard of the weights, for FSDP-sharded inference.
