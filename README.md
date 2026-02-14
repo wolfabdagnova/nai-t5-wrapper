@@ -6,6 +6,7 @@ This is a community fork that adds:
 - Drop-in replacement for HuggingFace's `T5EncoderModel`, `MT5EncoderModel`, and `UMT5EncoderModel`
 - Automatic runtime conversion from HuggingFace weights
 - MT5 and UMT5 model support
+- [ComfyUI support](https://github.com/bghira/nai-t5-comfy) via custom node
 
 ## Install
 
