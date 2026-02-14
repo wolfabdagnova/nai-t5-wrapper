@@ -4,6 +4,7 @@ from typing import Optional, Type, Dict, Any, NamedTuple
 from pydantic import BaseModel, field_validator, field_serializer
 
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from torch import FloatTensor, LongTensor, Tensor, nn
 from torch.nn import Linear, Embedding, init
@@ -369,7 +370,13 @@ class RMSNormCast(RMSNorm):
         else:
             x32 = x32 + residual.float()
             next_residual = x32.type(torch.float32 if self.residual_in_fp32 else orig_dtype)
-        normed: FloatTensor = super().forward(x32).type(orig_dtype)
+        
+        weight = self.weight
+        if weight is not None and weight.dtype != x32.dtype:
+            weight = weight.to(dtype=x32.dtype)
+        
+        normed: FloatTensor = F.rms_norm(x32, self.normalized_shape, weight, self.eps).type(orig_dtype)
+
         if prenorm:
             if self.residual_scale is not None:
                 next_residual = next_residual * self.residual_scale

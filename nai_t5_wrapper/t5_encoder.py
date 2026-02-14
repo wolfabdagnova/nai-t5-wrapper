@@ -38,7 +38,21 @@ except ImportError:
     create_block_mask_c = None
 
 ####
-#### T5 encoder self-attention
+#### Attention argument types
+####
+
+
+class SDPAArgs(NamedTuple):
+    position_bias: FloatTensor
+    mask: Optional[BoolTensor]
+
+
+class FlexArgs(NamedTuple):
+    block_mask: Optional[BlockMask]
+
+
+####
+#### T5 encoder self-attention (SDPA)
 ####
 
 
@@ -81,17 +95,16 @@ class T5EncoderSelfAttention(nn.Module):
         q, k, v = rearrange(
             qkv, "batch seq (proj heads head_dim) -> proj batch heads seq head_dim", proj=3, head_dim=self.head_dim
         ).unbind()
-        position_bias = position_bias.type_as(q)
-        # TODO: if training, then learn scales for Q and K as a proxy for learning rate
+
+        attn_mask = position_bias.type_as(q)
         if mask is not None:
-            assert mask.ndim == 4, "Expected [batch, heads, q, k] attention mask"
-            position_bias = position_bias.where(mask, -1e4)
+            attn_mask = attn_mask.masked_fill(~mask, torch.finfo(q.dtype).min)
+
         a = scaled_dot_product_attention(
             q,
             k,
             v,
-            # fused kernel requires last dimension of input to have stride 1.
-            attn_mask=position_bias.contiguous(),
+            attn_mask=attn_mask,
             dropout_p=self.dropout if self.training else 0.0,
             scale=self.scale,
         )
@@ -99,29 +112,32 @@ class T5EncoderSelfAttention(nn.Module):
         o = self.o_proj(a)
         return o
 
-    def init_weights(self):
-        nn.init.normal_(self.qkv_proj.weight, std=1 / math.sqrt(self.config.hidden_dim))
-        nn.init.normal_(self.o_proj.weight, std=1 / math.sqrt(self.config.hidden_dim * self.config.num_layers))
+    def init_weights(self, generator: Optional[torch.Generator] = None) -> None:
+        nn.init.normal_(self.qkv_proj.weight, std=1 / math.sqrt(self.config.hidden_dim), generator=generator)
+        nn.init.normal_(self.o_proj.weight, std=1 / math.sqrt(self.config.hidden_dim * self.config.num_layers), generator=generator)
+
+
+####
+#### T5 encoder self-attention (Flex)
+####
+
 
 class T5EncoderSelfAttentionFlex(nn.Module):
-    score_mod: Optional[ScoreMod] = None
     qkv_proj: Linear
     o_proj: Linear
     head_dim: int
     scale: float
     dropout: float
     config: T5Config
+    score_mod: Optional[ScoreMod]
 
     def __init__(self, config: T5Config) -> None:
         super().__init__()
         assert config.n_head == config.kv_heads, "Q and KV heads must be equal; GQA not implemented yet."
-        self.config = config
         self.head_dim = config.head_dim
         qkv_heads: int = config.n_head + config.kv_heads * 2
         self.scale = self.head_dim**-0.5 if config.scale_qk else 1.0
         self.dropout = config.dropout
-        # we don't have pos emb weights at the time of construction, so are not ready to bind the score_mod
-        self.score_mod = None
         self.qkv_proj = Linear(
             in_features=config.hidden_dim,
             out_features=config.head_dim * qkv_heads,
@@ -135,92 +151,36 @@ class T5EncoderSelfAttentionFlex(nn.Module):
             dtype=config.linear_weight_dtype,
         )
         self.config = config
+        self.score_mod = None
 
-    @staticmethod
-    def make_score_mod(pos_bias: FloatTensor) -> ScoreMod:
-        """
-        Uses basically none of the functionality of flex attention but outperforms SDPA cuDNN/cutlassF
-        and is also the fastest flex attention score_mod I was able to concoct
-        https://github.com/pytorch/pytorch/issues/138493
-        """
+    def make_score_mod(self, bias: FloatTensor) -> ScoreMod:
+        # bias shape: (heads, q_len, k_len) or (1, heads, q_len, k_len)
+        if bias.ndim == 4:
+            bias = bias.squeeze(0)
+
         def score_mod(
             score: FloatTensor,
-            b: IntTensor,
-            h: IntTensor,
+            batch: IntTensor,
+            head: IntTensor,
             q_idx: IntTensor,
             kv_idx: IntTensor,
         ) -> FloatTensor:
-            return score + pos_bias[h, q_idx, kv_idx]
+            return score + bias[head, q_idx, kv_idx]
+
         return score_mod
-
-    @staticmethod
-    def make_mask_mod_compat(mask: BoolTensor) -> MaskMod:
-        """
-        pad queries attend to unmasked keys.
-        this isn't necessary, but it's a convention used by other T5 implementations.
-        will make your outputs in pad positions more comparable to other implementations.
-        """
-        def mask_mod(
-            batch: IntTensor,
-            head: IntTensor,
-            q_idx: IntTensor,
-            kv_idx: IntTensor,
-        ) -> BoolTensor:
-            return mask[batch, kv_idx]
-        return mask_mod
-
-    @staticmethod
-    def make_mask_mod_fast(mask: BoolTensor) -> MaskMod:
-        """
-        pad queries attend to nothing. more sparsity, more speed.
-        rely on flex attention's safe_softmax to output 0-probability
-        attention distributions for pad queries instead of inf (not that
-        downstream code should be reading from these positions anyway).
-        """
-        def mask_mod(
-            batch: IntTensor,
-            head: IntTensor,
-            q_idx: IntTensor,
-            kv_idx: IntTensor,
-        ) -> BoolTensor:
-            return mask[batch, kv_idx] & mask[batch, q_idx]
-        return mask_mod
-    
-    @staticmethod
-    def make_doc_mask_mod(
-        doc_ids: BoolTensor,
-        pad_mask_mod: MaskMod,
-    ) -> MaskMod:
-        """
-        pack multiple sequences into 512-len contexts.
-        allows to modulate with a padding mask.
-        """
-        def mask_mod(
-            batch: IntTensor,
-            head: IntTensor,
-            q_idx: IntTensor,
-            kv_idx: IntTensor,
-        ) -> BoolTensor:
-            same_doc = doc_ids[batch, q_idx] == doc_ids[batch, kv_idx]
-            inner_mask = pad_mask_mod(batch, head, q_idx, kv_idx)
-            return same_doc & inner_mask
-
-        return mask_mod
 
     def forward(
         self,
         x: FloatTensor,
         block_mask: Optional[BlockMask] = None,
     ) -> FloatTensor:
-        # we refrain from binding score_mod on-demand because torch.compile would probably force you to do so repeatedly
-        assert self.score_mod is not None, "score_mod has not yet been bound. Use T5EncoderStack#bind_score_mods after loading weights."
+        from torch.nn.attention.flex_attention import flex_attention
+
         qkv: FloatTensor = self.qkv_proj(x)
         q, k, v = rearrange(
             qkv, "batch seq (proj heads head_dim) -> proj batch heads seq head_dim", proj=3, head_dim=self.head_dim
         ).unbind()
-        # NOTE: be sure to compile T5EncoderSelfAttentionFlex#forward! if you don't, then at least compile
-        # this flex_attention operation (you could replace it with a call to .flex_utils.get_compiled_flex)
-        from torch.nn.attention.flex_attention import flex_attention
+
         a = flex_attention(
             q,
             k,
@@ -228,7 +188,6 @@ class T5EncoderSelfAttentionFlex(nn.Module):
             score_mod=self.score_mod,
             block_mask=block_mask,
             scale=self.scale,
-            kernel_options=self.config.flex_kernel_options,
         )
         a = rearrange(a, "batch heads seq head_dim -> batch seq (heads head_dim)")
         o = self.o_proj(a)
@@ -238,111 +197,27 @@ class T5EncoderSelfAttentionFlex(nn.Module):
         nn.init.normal_(self.qkv_proj.weight, std=1 / math.sqrt(self.config.hidden_dim), generator=generator)
         nn.init.normal_(self.o_proj.weight, std=1 / math.sqrt(self.config.hidden_dim * self.config.num_layers), generator=generator)
 
-class CreateBlockMask(Protocol):
-    @staticmethod
-    def __call__(
-        mask_mod: MaskMod,
-        B: int,
-        H: int,
-        Q_LEN: int,
-        KV_LEN: int,
-    ) -> BlockMask: ...
-
-def make_self_attn_block_mask(
-    mask: BoolTensor,
-    mask_pad_queries=True,
-    create_block_mask: CreateBlockMask = create_block_mask_c,
-) -> BlockMask:
-    from nai_t5_wrapper.t5_encoder import T5EncoderSelfAttentionFlex
-    seq_len: int = mask.size(-1)
-    make_mask_mod: Callable[[BoolTensor], MaskMod] = (
-        T5EncoderSelfAttentionFlex.make_mask_mod_fast if mask_pad_queries else T5EncoderSelfAttentionFlex.make_mask_mod_compat
-    )
-    mask_mod: MaskMod = make_mask_mod(mask)
-
-    assert callable(create_block_mask), "create_block_mask implementation was not callable"
-
-    block_mask: BlockMask = create_block_mask(
-        mask_mod=mask_mod,
-        B=mask.size(0),
-        H=1, # broadcast over all heads
-        Q_LEN=seq_len,
-        KV_LEN=seq_len,
-    )
-    return block_mask
-
-def make_self_attn_doc_block_mask(
-    doc_ids: IntTensor,
-    pad_mask: BoolTensor,
-    mask_pad_queries=True,
-    create_block_mask: CreateBlockMask = create_block_mask_c,
-) -> BlockMask:
-    """
-    doc_ids: [batch, ctx_len]
-        if you have multiple short prompts, you can pack them into the same 512-ctx.
-        tell us which prompt each token belongs to (e.g. [[0, 0, 0, 1, 1, ...]])
-    pad_mask: [batch, ctx_len]
-        if you can't fill the entire 512-ctx, you can indicate padding with zeros.
-    mask_pad_queries:
-        optimization to prevent pad queries from attending to anything, improving sparsity.
-        flex_attention's safe_softmax will output 0-probabilities for queries in pad positions.
-    """
-    from torch.nn.attention.flex_attention import create_block_mask
-    seq_len: int = doc_ids.size(-1)
-    make_pad_mask_mod: Callable[[BoolTensor], MaskMod] = (
-        T5EncoderSelfAttentionFlex.make_mask_mod_fast if mask_pad_queries else T5EncoderSelfAttentionFlex.make_mask_mod_compat
-    )
-    pad_mask_mod: MaskMod = make_pad_mask_mod(pad_mask)
-    doc_mask_mod: MaskMod = T5EncoderSelfAttentionFlex.make_doc_mask_mod(
-        doc_ids=doc_ids,
-        pad_mask_mod=pad_mask_mod,
-    )
-
-    assert callable(create_block_mask), "create_block_mask implementation was not callable"
-
-    block_mask: BlockMask = create_block_mask(
-        mask_mod=doc_mask_mod,
-        B=doc_ids.size(0),
-        H=1, # broadcast over all heads
-        Q_LEN=seq_len,
-        KV_LEN=seq_len,
-    )
-    return block_mask
-
-class EncoderSelfAttentionFactory(Protocol):
-    @staticmethod
-    def __call__(config: T5Config) -> T5EncoderSelfAttention | T5EncoderSelfAttentionFlex: ...
 
 ####
-#### T5 encoder layers
+#### T5 encoder layer
 ####
 
-class SDPAArgs(NamedTuple):
-    position_bias: FloatTensor
-    mask: Optional[BoolTensor]
-
-class FlexArgs(NamedTuple):
-    block_mask: Optional[BlockMask]
 
 class T5EncoderLayer(nn.Module):
     attn: T5EncoderSelfAttention | T5EncoderSelfAttentionFlex
     ln1: RMSNormCast
     """pre-attn layer norm"""
     ln2: RMSNormCast
-    """post-attn layer norm"""
+    """pre-ffn layer norm"""
     ffn: T5ReLUFFN | T5GEGLUFFN
     dropout: nn.Dropout
 
-    def __init__(
-        self,
-        config: T5Config,
-        attn_ctor: EncoderSelfAttentionFactory = T5EncoderSelfAttention,
-    ) -> None:
+    def __init__(self, config: T5Config, attn_ctor: type) -> None:
         super().__init__()
         self.attn = attn_ctor(config)
-        ffn_factory = get_ffn_factory(config.ffn_type)
         self.ln1 = RMSNormCast(config.hidden_dim, eps=config.eps, dtype=config.norm_weight_dtype, elementwise_affine=config.elementwise_affine)
         self.ln2 = RMSNormCast(config.hidden_dim, eps=config.eps, dtype=config.norm_weight_dtype, elementwise_affine=config.elementwise_affine)
+        ffn_factory = get_ffn_factory(config.ffn_type)
         self.ffn = ffn_factory(config)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -363,6 +238,53 @@ class T5EncoderLayer(nn.Module):
         self.ln1.reset_parameters()
         self.ln2.reset_parameters()
         self.ffn.init_weights(generator)
+
+
+####
+#### Block mask helper for Flex Attention
+####
+
+
+def make_self_attn_block_mask(
+    mask: BoolTensor,
+    mask_pad_queries: bool = True,
+    create_block_mask: Optional[Callable] = None,
+) -> BlockMask:
+    """Create a block mask for encoder self-attention with padding support.
+
+    Args:
+        mask: Bool padding mask of shape (batch, seq_len). True = real token, False = padding.
+        mask_pad_queries: If True, padding queries also don't attend to anything.
+        create_block_mask: The create_block_mask function to use. If None, uses the
+            module-level compiled version or imports the default.
+    """
+    B, S = mask.shape
+
+    def mask_mod(
+        batch: IntTensor,
+        head: IntTensor,
+        q_idx: IntTensor,
+        kv_idx: IntTensor,
+    ) -> BoolTensor:
+        kv_valid = mask[batch, kv_idx]
+        if mask_pad_queries:
+            q_valid = mask[batch, q_idx]
+            return kv_valid & q_valid
+        return kv_valid
+
+    if create_block_mask is None:
+        if create_block_mask_c is not None:
+            create_block_mask = create_block_mask_c
+        else:
+            from torch.nn.attention.flex_attention import create_block_mask as _cbm
+            create_block_mask = _cbm
+
+    return create_block_mask(mask_mod, B, 1, S, S, device=mask.device)
+
+
+####
+#### T5 encoder stack
+####
 
 
 class T5EncoderStack(nn.Module):
@@ -413,7 +335,7 @@ class T5EncoderStack(nn.Module):
     ) -> FloatTensor:
         seq_len: int = input_ids.size(-1)
         input_embeds = self.vocab_embed(input_ids.flatten(end_dim=-2))
-        
+
         attn_args: list[SDPAArgs|FlexArgs]
         match self.config.attn_impl:
             case T5AttnImpl.SDPA:
@@ -426,7 +348,7 @@ class T5EncoderStack(nn.Module):
                 biases: list[FloatTensor] = position_bias.unbind() if self.config.pos_emb_per_layer else [position_bias]*self.config.num_layers
 
                 attn_mask: Optional[BoolTensor] = None if input_mask is None else self.broadcast_mask(input_mask, input_ids)
-                    
+
                 attn_args = [SDPAArgs(
                     position_bias=bias,
                     mask=attn_mask,
@@ -455,7 +377,7 @@ class T5EncoderStack(nn.Module):
             layer: T5EncoderLayer
             attn: T5EncoderSelfAttentionFlex = layer.attn
             attn.score_mod = attn.make_score_mod(bias)
-    
+
     def broadcast_mask(self, input_mask: BoolTensor, input_ids: LongTensor) -> BoolTensor:
         seq_len: int = input_ids.size(-1)
         scores_shape = torch.Size((input_ids.size(0), self.config.n_head, seq_len, seq_len))
