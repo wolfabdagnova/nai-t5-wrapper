@@ -25,7 +25,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nai-t5-wrapper"
-version = "1.0.0"
+version = "1.1.0"
 description = "HuggingFace-compatible wrapper for NovelAI's T5 with Flex Attention - supports T5, MT5, and UMT5"
 authors = [
     {name = "NovelAI/Anlatan Inc."},
